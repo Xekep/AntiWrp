@@ -1,0 +1,181 @@
+format pe gui 4.0 dll
+include '%fasm_inc%\win32ax.inc'
+
+IMAGE_DIRECTORY_ENTRY_IMPORT = 1
+
+struct	IMAGE_IMPORT_DESCRIPTOR
+    OriginalFirstThunk	dd  ?
+    TimeDateStamp	dd  ?
+    ForwarderChain	dd  ?
+    Name		dd  ?
+    FirstThunk		dd  ?
+ends
+
+.data
+WaitForSingleObject_ dd ?
+hmodCaller dd ?
+ImageDirectoryEntryToData dd ?
+hProcess dd 0
+CreateProcessW_ dd ?
+CreateWindowExW_ dd ?
+GetSystemTimeAsFileTime_ dd ?
+pkernel32 dd ?
+ftime FILETIME
+
+.code
+
+proc start hinstDLL,fdwReason,lpvReserved
+	cmp [fdwReason],DLL_PROCESS_ATTACH
+	jne .exit
+	invoke GetModuleHandleA,0;'drm'
+	mov [hmodCaller],eax
+
+	invoke LoadLibrary,'imagehlp.dll'
+	invoke GetProcAddress,eax,'ImageDirectoryEntryToData'
+	mov [ImageDirectoryEntryToData],eax
+	invoke GetModuleHandleA,'KERNEL32.DLL'
+	mov [pkernel32],eax
+	invoke GetProcAddress,eax,'WaitForSingleObject'
+	test eax,eax
+	je @f
+	mov [WaitForSingleObject_],eax
+	stdcall ReplaceIATEntryInOneMod,'KERNEL32.DLL',eax,_WaitForSingleObject,[hmodCaller]
+	@@:
+	;
+	invoke GetProcAddress,[pkernel32],'CreateProcessW'
+	test eax,eax
+	je @f
+	mov [CreateProcessW_],eax
+	stdcall ReplaceIATEntryInOneMod,'KERNEL32.DLL',eax,_CreateProcessW,[hmodCaller]
+	@@:
+	;
+	invoke GetModuleHandleA,'USER32.DLL'
+	invoke GetProcAddress,eax,'CreateWindowExW'
+	test eax,eax
+	je @f
+	mov [CreateWindowExW_],eax
+	stdcall ReplaceIATEntryInOneMod,'USER32.DLL',eax,_CreateWindowExW,[hmodCaller]
+	@@:
+	;
+	invoke GetProcAddress,[pkernel32],'GetSystemTimeAsFileTime'
+	test eax,eax
+	je @f
+	mov [GetSystemTimeAsFileTime_],eax
+	stdcall [GetSystemTimeAsFileTime_],ftime
+	stdcall ReplaceIATEntryInOneMod,'KERNEL32.DLL',[GetSystemTimeAsFileTime_],_GetSystemTimeAsFileTime,[hmodCaller]
+	@@:
+	.exit:
+	ret
+endp
+
+proc _GetSystemTimeAsFileTime lpSystemTimeAsFileTime
+	mov eax,[lpSystemTimeAsFileTime]
+	mov ecx,[ftime.dwLowDateTime]
+	mov [eax+FILETIME.dwLowDateTime],ecx
+	mov ecx,[ftime.dwHighDateTime]
+	mov [eax+FILETIME.dwHighDateTime],ecx
+	ret
+endp
+
+proc _CreateWindowExW ExStyle,Class,WindowName,Style,x,y,Width,Height,hParent,\
+		      hMenu,hInst,lParam
+
+	.if [Width]=800 & [Height]=600
+		xor eax,eax
+		jmp @f
+	.endif
+	stdcall [CreateWindowExW_],[ExStyle],[Class],[WindowName],[Style],[x],[y],[Width],\
+				   [Height],[hParent],[hMenu],[hInst],[lParam]
+	@@:
+	ret
+endp
+
+proc _CreateProcessW lpApplicationName,lpCommandLine,lpProcessAttributes,\
+		     lpThreadAttributes,bInheritHandles,dwCreationFlags,lpEnvironment,\
+		     lpCurrentDirectory,lpStartupInfo,lpProcessInformation
+
+	stdcall [CreateProcessW_],[lpApplicationName],[lpCommandLine],[lpProcessAttributes],\
+		     [lpThreadAttributes],[bInheritHandles],[dwCreationFlags],[lpEnvironment],\
+		     [lpCurrentDirectory],[lpStartupInfo],[lpProcessInformation]
+	invoke lstrlenW,[lpApplicationName]
+	lea eax,[eax*2]
+	sub eax,8
+	add eax,[lpApplicationName]
+	call @f
+	du '.exe',0
+	@@:
+	invoke lstrcmpiW,eax
+	.if eax=0
+		mov eax,[lpProcessInformation]
+		mov eax,[eax+PROCESS_INFORMATION.hProcess]
+		mov [hProcess],eax
+	.else
+		mov eax,[lpProcessInformation]
+		mov eax,[eax+PROCESS_INFORMATION.hProcess]
+	.endif
+	ret
+endp
+
+proc _WaitForSingleObject hObject,dwTimeout
+	mov eax,[hProcess]
+	.if [hObject]=eax
+		stdcall [WaitForSingleObject_],[hObject],-1
+	.else
+		stdcall [WaitForSingleObject_],[hObject],[dwTimeout]
+	.endif
+	ret
+endp
+
+proc ReplaceIATEntryInOneMod pszCalleeModName,pfnCurrent,pfnNew,hmodCaller
+	local pImportDesc:DWORD
+	local ulSize:DWORD
+
+	; Получение указателя на секцию импорта
+	lea eax,[ulSize]
+	invoke ImageDirectoryEntryToData,[hmodCaller],TRUE,IMAGE_DIRECTORY_ENTRY_IMPORT,eax
+	test eax,eax
+	je .err1
+	mov [pImportDesc],eax
+	; Получение указателя на секцию импорта у нужной библиотеки
+	@@:
+	mov eax,[pImportDesc]
+	mov eax,[eax+IMAGE_IMPORT_DESCRIPTOR.Name]
+	add eax,[hmodCaller]
+	test eax,eax
+	je .err1
+	invoke lstrcmpiA,eax,[pszCalleeModName]
+	test eax,eax
+	je .end1
+	add [pImportDesc],sizeof.IMAGE_IMPORT_DESCRIPTOR
+	jmp @b
+      .end1:
+	; Получение указателя на нужную функцию и его подмена
+	mov eax,[pImportDesc]
+	mov eax,[eax+IMAGE_IMPORT_DESCRIPTOR.FirstThunk]
+	add eax,[hmodCaller]
+	mov ecx,[pfnCurrent]
+	@@:
+	cmp dword [eax],0
+	je .err1
+	cmp ecx,[eax]
+	jne .end2
+	pushad
+	lea ecx,[ulSize]
+	invoke VirtualProtect,eax,4,PAGE_EXECUTE_READWRITE,ecx
+	popad
+	mov ecx,[pfnNew]
+	mov [eax],ecx
+	jmp @f
+      .end2:
+	add eax,4
+	jmp @b
+	@@:
+	xor eax,eax
+	inc eax
+	ret
+     .err1:
+	xor eax,eax
+	ret
+endp
+.end start
+section '.reloc' fixups data discardable

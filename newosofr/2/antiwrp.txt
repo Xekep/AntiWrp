@@ -1,0 +1,91 @@
+format pe gui 4.0
+include '%fasm_inc%\win32ax.inc'
+
+.data
+wrpexe db 'drm.exe',0
+maintitle db 'ָדנû מע ֽוגמסמפע',0
+injlib db 'antiwrp.dll',0
+sr WIN32_FIND_DATA
+pinfo PROCESS_INFORMATION
+sinfo STARTUPINFO
+
+.code
+start:
+	invoke FindWindowA,0,maintitle
+	.if eax<>0
+		invoke GetWindowThreadProcessId,eax,pinfo.dwProcessId
+	.else
+		invoke CreateProcessA,0,wrpexe,0,0,0,0,0,0,sinfo,pinfo
+		invoke WaitForInputIdle,[pinfo.hProcess],-1
+		jmp start
+	.endif
+	stdcall InjectLibA,injlib,[pinfo.dwProcessId],1
+	.if eax=0
+		invoke MessageBoxTimeoutA,0,'ERR',0,0,MB_OK,5000
+	.endif
+	invoke ExitProcess,0
+
+proc InjectLibA libname,pid,curdir
+	local hProcess:DWORD
+	local mem:DWORD
+	local size:DWORD
+	local buff rb 512
+
+	.if [curdir]=1
+		lea eax,[buff]
+		invoke GetCurrentDirectoryA,512,eax
+		lea ecx,[buff]
+		mov byte [eax+ecx],'\'
+		invoke lstrcatA,ecx,[libname]
+	.endif
+	invoke OpenProcess,PROCESS_QUERY_INFORMATION + PROCESS_CREATE_THREAD+\
+			   PROCESS_VM_OPERATION + PROCESS_VM_WRITE,0,[pid]
+	test eax,eax
+	je .err1
+	mov [hProcess],eax
+	.if [curdir]=1
+		lea eax,[buff]
+		push eax
+	.else
+		push [libname]
+	.endif
+	invoke lstrlenA
+	inc eax
+	mov [size],eax
+	invoke VirtualAllocEx,[hProcess],0,eax,MEM_COMMIT,PAGE_READWRITE
+	test eax,eax
+	je .err2
+	mov [mem],eax
+	.if [curdir]=1
+		lea ecx,[buff]
+	.else
+		mov ecx,[libname]
+	.endif
+	invoke WriteProcessMemory,[hProcess],eax,ecx,[size],0
+	test eax,eax
+	je .err3
+	invoke GetModuleHandle,'kernel32.dll'
+	invoke GetProcAddress,eax,'LoadLibraryA'
+	test eax,eax
+	je .err3
+	invoke CreateRemoteThread,[hProcess],0,0,eax,[mem],0,0
+	test eax,eax
+	je .err3
+	push eax
+	invoke WaitForSingleObject,eax,-1
+	pop eax
+	invoke CloseHandle,eax
+	invoke VirtualFreeEx,[hProcess],[mem],0,MEM_RELEASE
+	invoke CloseHandle,[hProcess]
+	xor eax,eax
+	inc eax
+	ret
+       .err3:
+	invoke VirtualFreeEx,[hProcess],[mem],0,MEM_RELEASE
+       .err2:
+	invoke CloseHandle,[hProcess]
+       .err1:
+	xor eax,eax
+	ret
+endp
+.end start
